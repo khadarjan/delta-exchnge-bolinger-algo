@@ -27,12 +27,14 @@ import requests
 import pandas as pd
 import config as cfg
 
+RES_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600,
+               "2h": 7200, "4h": 14400, "6h": 21600, "1d": 86400}
 
-def fetch_candles(symbol: str, resolution: str, count: int) -> pd.DataFrame:
+
+def fetch_candles(symbol: str, resolution: str, count: int, include_forming: bool = False) -> pd.DataFrame:
     """Pull the most recent `count` candles from Delta's public history endpoint."""
     end = int(time.time())
-    seconds_map = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
-    step = seconds_map.get(resolution, 14400)
+    step = RES_SECONDS[resolution]
     start = end - step * (count + 5)
 
     url = f"{cfg.BASE_URL}/v2/history/candles"
@@ -51,6 +53,10 @@ def fetch_candles(symbol: str, resolution: str, count: int) -> pd.DataFrame:
     df = df.rename(columns={"time": "timestamp"})
     df = df[["timestamp", "open", "high", "low", "close", "volume"]].astype(float)
     df = df.sort_values("timestamp").reset_index(drop=True)
+
+    # Drop the still-forming candle unless the caller (intrabar mode) wants to watch it.
+    if not include_forming and df["timestamp"].iloc[-1] + step > time.time():
+        df = df.iloc[:-1].reset_index(drop=True)
     return df
 
 
@@ -186,3 +192,37 @@ def compute_signal(df: pd.DataFrame) -> dict:
         prev_row = row
 
     return result
+
+def armed_setups(df: pd.DataFrame) -> list:
+    """
+    Setups ARMED by the last row of `df` (pass CLOSED candles only): the C1 candidates whose
+    buffered breakout level C2 (the next candle) can still trigger. Same C1 conditions, buffer,
+    SL clamp and TP floor as compute_signal(), so the two modes trade the same setups.
+    Each item: {"signal","setup_type","entry"(trigger level),"sl","tp","c1_index"}.
+    """
+    d = compute_bands(df)
+    if len(d) <= cfg.BB_LENGTH:
+        return []
+    row = d.iloc[-1]
+    if pd.isna(row.bb_upper) or pd.isna(row.bb_lower):
+        return []
+    high, low, close = float(row.high), float(row.low), float(row.close)
+    upper, lower = float(row.bb_upper), float(row.bb_lower)
+    buf = cfg.BB_BREAK_BUFFER
+    out = []
+
+    def mk(signal, setup_type, trigger):
+        if signal == "BUY":
+            risk = min(trigger - low, cfg.MAX_SL_POINTS)
+            sl, tp = trigger - risk, trigger + max(cfg.RR * risk, cfg.MIN_TARGET_POINTS)
+        else:
+            risk = min(high - trigger, cfg.MAX_SL_POINTS)
+            sl, tp = trigger + risk, trigger - max(cfg.RR * risk, cfg.MIN_TARGET_POINTS)
+        out.append({"signal": signal, "setup_type": setup_type, "entry": float(trigger),
+                    "sl": float(sl), "tp": float(tp), "c1_index": len(d) - 1})
+
+    if low <= lower and close > lower:  mk("BUY",  "pierce",     high + buf)   # band pierce, bullish rejection
+    if high >= upper and close < upper: mk("SELL", "pierce",     low - buf)    # band pierce, bearish rejection
+    if high < lower:                    mk("BUY",  "band_break", high + buf)   # whole candle below lower band
+    if low > upper:                     mk("SELL", "band_break", low - buf)    # whole candle above upper band
+    return out

@@ -1,4 +1,15 @@
 {
-  "last_processed_timestamp": 1784635200.0,
-  "open_position": null
+  "open_position": null,
+  "last_processed": {},
+  "armed": {
+    "2h": {
+      "c1_ts": 1791705600.0,
+      "setups": []
+    },
+    "4h": {
+      "c1_ts": 1791691200.0,
+      "setups": []
+    }
+  },
+  "entered": {}
 }
